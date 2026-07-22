@@ -170,8 +170,11 @@ const pixelVal = document.getElementById('pixelVal');
 
 let cutoutImage = null; // 배경 제거된 canvas
 let transformersLib = null;
-let bgSegmenter = null;
-const MODEL_ID = 'onnx-community/BiRefNet_lite-ONNX'; // 범용 객체(음식/제품 등) 배경 제거, MIT 라이선스
+let bgModel = null;
+let bgProcessor = null;
+// BiRefNet 계열은 고품질이지만 브라우저 WASM 메모리 한도를 넘어 bad_alloc 오류가 났음.
+// U-2-Netp는 가볍고(약 4~5MB) 범용 객체(음식/제품 등)에도 쓸 수 있는 Apache-2.0 라이선스 모델이라 안정성을 위해 이걸로 대체함.
+const MODEL_ID = 'BritishWerewolf/U-2-Netp';
 const MAX_DIM = 1400;
 
 [rotationEl, zoomEl, flipHEl, flipVEl, shuffleEl, hueEl, pixelSizeEl].forEach(el =>
@@ -215,20 +218,35 @@ async function handleFile(file) {
   cutoutImage = null;
   try {
     const resizedBlob = await resizeIfNeeded(file);
-    const { pipeline, env } = await loadLibrary();
+    const { AutoModel, AutoProcessor, RawImage, env } = await loadLibrary();
     env.backends.onnx.wasm.proxy = false;
 
-    if (!bgSegmenter) {
+    if (!bgModel) {
       progressEl.style.display = 'block';
       progressEl.removeAttribute('value');
-      setStatus('배경 제거 모델을 다운로드하는 중... (최초 1회, 수십~수백 MB, 시간이 걸릴 수 있어요)');
-      bgSegmenter = await pipeline('background-removal', MODEL_ID, { dtype: 'fp16' });
+      setStatus('배경 제거 모델을 다운로드하는 중... (최초 1회)');
+      bgModel = await AutoModel.from_pretrained(MODEL_ID, { dtype: 'fp32' });
+      bgProcessor = await AutoProcessor.from_pretrained(MODEL_ID);
     }
 
     setStatus('배경 제거 중...');
     const objectUrl = URL.createObjectURL(resizedBlob);
-    const result = await bgSegmenter(objectUrl);
-    const canvas = result[0].toCanvas();
+    const img = await RawImage.fromURL(objectUrl);
+    const { pixel_values } = await bgProcessor(img);
+    const { mask } = await bgModel({ input: pixel_values });
+    const maskImage = await RawImage.fromTensor(mask).resize(img.width, img.height);
+    const maskData = maskImage.data;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    const cctx = canvas.getContext('2d');
+    cctx.drawImage(img.toCanvas(), 0, 0);
+    const pixelData = cctx.getImageData(0, 0, img.width, img.height);
+    for (let i = 0; i < maskData.length; i++) {
+      pixelData.data[4 * i + 3] = maskData[i];
+    }
+    cctx.putImageData(pixelData, 0, 0);
 
     cutoutImage = canvas;
     outputCanvas.width = canvas.width;
@@ -242,7 +260,8 @@ async function handleFile(file) {
     progressEl.style.display = 'none';
     setStatus('오류가 발생했습니다: ' + err.message);
     console.error(err);
-    bgSegmenter = null; // 실패한 세션을 캐시해두지 않고 다음 시도 때 새로 만들도록 함
+    bgModel = null; // 실패한 세션을 캐시해두지 않고 다음 시도 때 새로 만들도록 함
+    bgProcessor = null;
   }
 }
 
