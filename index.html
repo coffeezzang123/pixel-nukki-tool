@@ -232,7 +232,8 @@ async function handleFile(file) {
     setStatus('배경 제거 중...');
     const objectUrl = URL.createObjectURL(resizedBlob);
     const result = await bgSegmenter(objectUrl);
-    const canvas = result[0].toCanvas();
+    const output = Array.isArray(result) ? result[0] : result;
+    const canvas = output.toCanvas();
 
     cutoutImage = canvas;
     outputCanvas.width = canvas.width;
